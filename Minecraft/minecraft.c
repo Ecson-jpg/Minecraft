@@ -4,6 +4,16 @@
 #include <stdint.h>
 #include <termios.h>
 #include <stdlib.h>
+#include <math.h>
+#define Y_PIXELS 40
+#define X_PIXELS 120
+#define Y_BLOCKS 20
+#define X_BLOCKS 20
+#define Z_BLOCKS 10
+#define EYE_HEIGHT 1.5 
+#define VIEW_HEIGHT 0.7
+#define VIEW_WIDTH 1
+#define BLOCK_BORDER_SIZE 0.02
 
 static struct termios old_termios, new_termios;
 
@@ -50,7 +60,7 @@ void process_input() {
         keystate[i] = 0;
     }
     while(read(STDIN_FILENO, &c, 1) > 0) {
-        printf("\ninput: %c", c);
+        // printf("\ninput: %c", c);
         unsigned char uc = (unsigned char)c;
         keystate[uc] = 1;
     }
@@ -61,32 +71,224 @@ int is_key_pressed(char key) {
 }
 
 char** init_picture() {
-    return NULL;
+    char** picture = malloc(sizeof(char*) * Y_PIXELS);
+    for (int i = 0; i < Y_PIXELS; i++) {
+        picture[i] = malloc(sizeof(char) * X_PIXELS);   
+    }
+    return picture;
 }
+
 char*** init_blocks() {
-    return NULL;
+    char*** blocks = malloc(sizeof(char**) * Z_BLOCKS);
+    for (int i = 0; i < Z_BLOCKS; i++) {
+        blocks[i] = malloc(sizeof(char*) * Y_BLOCKS);
+        for (int j = 0; j < Y_BLOCKS; j++) {
+            blocks[i][j] = malloc(sizeof(char) * X_BLOCKS);
+            for ( int k = 0; k < X_BLOCKS; k++) {
+                blocks[i][j][k] = ' ';
+            }
+        }
+    }
+    return blocks;
 }
 
 player_pos_view init_posview(){
     player_pos_view posview;
     posview.pos.x = 5;
     posview.pos.y = 5;
-    posview.pos.z = 5;
+    posview.pos.z = 4 + EYE_HEIGHT;
     posview.view.phi = 0;
     posview.view.psi = 0;
+    return posview;
+}
+
+vect angles_to_vect(vect2 angles) {
+    vect res;
+    res.x = cos(angles.psi) * cos(angles.phi);
+    res.y = cos(angles.psi) * cos(angles.phi);
+    res.z = sin(angles.psi);
+    return res;
+}
+
+vect vect_add(vect v1, vect v2) {
+    vect res;
+    res.x = v1.x + v2.x;
+    res.y = v1.y + v2.y;
+    res.z = v1.z + v2.z;
+    return res;
+}
+vect vect_scale(float s, vect v) { 
+    vect res = {s * v.x, s * v.y, s * v.z};
+    return res;
+}
+vect vect_sub(vect v1, vect v2) { 
+    vect res;
+    res.x = v1.x - v2.x;
+    res.y = v1.y - v2.y;
+    res.z = v1.z - v2.z;
+    return res;
+}
+
+void vect_normalize(vect* v) {
+    float len = sqrt( v->x * v->x + v->y * v->y + v->z * v-> z);
+    v->x /= len;
+    v->z /= len;
+    v->y /= len;
+}
+
+vect** init_directions(vect2 view){
+    view.psi -= VIEW_HEIGHT / 2.0;
+    vect screen_down = angles_to_vect(view);
+    view.psi += VIEW_HEIGHT;
+    vect screen_up = angles_to_vect(view);
+    view.psi -= VIEW_HEIGHT / 2.0;
+    view.phi -= VIEW_WIDTH / 2.0;
+    vect screen_left = angles_to_vect(view);
+    view.phi += VIEW_WIDTH;
+    vect screen_right = angles_to_vect(view);
+    view.phi += VIEW_WIDTH / 2.0;
+
+    vect screen_mid_vert = vect_scale(0.5, vect_add(screen_up, screen_down));
+    vect screen_mid_hor = vect_scale(0.5, vect_add(screen_left, screen_right));
+    vect mid_to_left = vect_sub(screen_left, screen_mid_hor);
+    vect mid_to_up = vect_sub(screen_up,screen_mid_vert);
+
+    vect** dir = malloc(sizeof(vect*) * Y_PIXELS);
+    for ( int i = 0; i < Y_PIXELS; i++) {
+        dir[i] = malloc(sizeof(vect) * X_PIXELS);
+    }
+    for ( int y_pix = 0; y_pix < Y_PIXELS; y_pix++) {
+        for (int x_pix = 0; x_pix < X_PIXELS; x_pix++) { 
+            vect temp = vect_add(vect_add(screen_mid_hor, mid_to_left), mid_to_up);
+            temp = vect_sub(temp, vect_scale(((float)x_pix / (X_PIXELS - 1)) * 2, mid_to_left));
+            temp = vect_sub(temp, vect_scale(((float)y_pix / (Y_PIXELS - 1)) * 2, mid_to_up));
+            vect_normalize(&temp);
+            dir[y_pix][x_pix] = temp;
+        }
+    }
+    return dir;
+}
+
+int ray_outside(vect pos) {
+    if (pos.x >= X_BLOCKS || pos.y >= Y_BLOCKS || pos.z >= Z_BLOCKS
+        || pos.x < 0 || pos.y < 0 || pos.z < 0) { 
+        return 1;
+        }
+    return 0;
+}
+
+int on_block_border( vect pos ) { 
+    int cnt = 0;
+    if(fabsf (pos.x - roundf(pos.x)) < BLOCK_BORDER_SIZE) {
+        cnt++;
+    }
+    if(fabsf (pos.y - roundf(pos.y)) < BLOCK_BORDER_SIZE) {
+        cnt++;
+    }
+    if(fabsf (pos.z - roundf(pos.z)) < BLOCK_BORDER_SIZE) {
+        cnt++;
+    }
+    if(cnt >= 2) {
+        return 1;
+    }
+    return 0;
+}
+
+float min(float a, float b) {
+    if( a < b ) {
+        return a;
+    }
+    return b;
+}
+char raytrace(vect pos, vect dir, char *** blocks) {
+    float eps = 0.01;
+    while(!ray_outside(pos)) {
+        char c  = blocks[(int)pos.z][(int)pos.y][(int)pos.x];
+        if (c != ' ') {
+            if (on_block_border(pos)) {
+                return '-';
+            }
+            else {
+                return c;
+            }
+        }
+        float dist = 2;
+        if(dir.x > eps) {
+            dist = min(dist, ((int)(pos.x + 1) - pos.x ) / dir.x);
+        } else if (dir.x < -eps) { 
+            dist = min(dist, ((int)pos.x - pos.x) / dir.x);
+        }
+        if(dir.z > eps) {
+            dist = min(dist, ((int)(pos.z + 1) - pos.z ) / dir.z);
+        } else if (dir.z < -eps) { 
+            dist = min(dist, ((int)pos.z - pos.z) / dir.z);
+        }
+        if(dir.y > eps) {
+            dist = min(dist, ((int)(pos.y + 1) - pos.y ) / dir.y);
+        } else if (dir.y < -eps) { 
+            dist = min(dist, ((int)pos.y - pos.y) / dir.y);
+        }
+        pos = vect_add(pos, vect_scale(dist + eps, dir));
+        }
+    return ' ';
+}
+
+char** get_picture(char** picture, player_pos_view posview, char*** blocks) {
+    vect** directions = init_directions(posview.view);
+    for (int y = 0; y < Y_PIXELS; y++) {
+        for (int x = 0; x < X_PIXELS; x++) {
+            picture[y][x] = raytrace(posview.pos, directions[y][x], blocks);
+        }
+    }
+}
+
+void draw_ascii(char** picture) {
+    fflush(stdout);
+    printf("\033[0;0H");
+    for (int i = 0; i < Y_PIXELS; i++) {
+        int current_color = 0;
+        for (int j = 0; j < X_PIXELS; j++) {
+            // printf("%c", picture[i][j]);
+            if (picture[i][j] == 'o' && current_color != 32) {
+                printf("\x1B[32m");
+                current_color = 32;
+            }
+            else if (picture[i][j] != 'o' && current_color != 0) {
+                printf("\x1B[0m");
+                current_color = 0;
+            }
+            printf("%c", picture[i][j]);
+        }
+        printf("\x1B[0m\n");
+    }
 }
 
 int main() {
     init_terminal();
     char** picture = init_picture();
     char*** blocks = init_blocks();
-    player_po_view posview = init_posview();
+    for ( int x = 0; x < X_BLOCKS; x++){
+        for (int y = 0; y < Y_BLOCKS; y++){
+            for (int z = 0; z < Z_BLOCKS; z++){
+                if (z == 0) {  // Floor
+                    blocks[z][y][x] = '@';
+                } else if (x == 0 || x == X_BLOCKS-1 || y == 0 || y == Y_BLOCKS-1) {  // Walls
+                    blocks[z][y][x] = '@';
+                } else {
+                    blocks[z][y][x] = ' ';
+                }
+            }
+        }
+    }
+    player_pos_view posview = init_posview();
     while(1) {
         process_input();
         usleep(20000);
         if(is_key_pressed('q')) {
             exit(0);
         }
+        get_picture(picture, posview, blocks);
+        draw_ascii(picture);
     }
     restart_terminal();
     return 0;
